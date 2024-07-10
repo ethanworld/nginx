@@ -561,6 +561,7 @@ ngx_resolve_name_done(ngx_resolver_ctx_t *ctx)
 
             while (w) {
                 if (w == ctx) {
+                    // rc->waiting置NULL，resend_timout超时回调时释放RN
                     *p = w->next;
 
                     goto done;
@@ -668,7 +669,7 @@ ngx_resolve_name_locked(ngx_resolver_t *r, ngx_resolver_ctx_t *ctx,
                 }
 
                 last->next = rn->waiting;
-                rn->waiting = NULL;
+                rn->waiting = NULL; // 查到有效的RN，则RN->waiting上不挂ctx链
 
                 /* unlock name mutex */
 
@@ -688,7 +689,7 @@ ngx_resolve_name_locked(ngx_resolver_t *r, ngx_resolver_ctx_t *ctx,
                     } else {
                         ctx->addrs = addrs;
                     }
-
+                    // ctx及ctx->next都回调处理
                     next = ctx->next;
 
                     ctx->handler(ctx);
@@ -749,6 +750,7 @@ ngx_resolve_name_locked(ngx_resolver_t *r, ngx_resolver_ctx_t *ctx,
             return NGX_OK;
         }
 
+        // rn上有等待解析的ctx链
         if (rn->waiting) {
             if (ngx_resolver_set_timeout(r, ctx) != NGX_OK) {
                 return NGX_ERROR;
@@ -887,7 +889,11 @@ ngx_resolve_name_locked(ngx_resolver_t *r, ngx_resolver_ctx_t *ctx,
         goto failed;
     }
 
+    // resend重试机制是resolver粒度，作用于所有使用该resolver的所有请求
+    // 当重试队列为空时，则需要使能r->event重传定时器
+    // 该定时器超时时，会遍历resolver的resend_queue，对所有需要重传的node进行判断
     if (ngx_resolver_resend_empty(r)) {
+        // ngx_add_timer是一次性定时，想达到循环定时效果需要超时回调中再添加定时器
         ngx_add_timer(r->event, (ngx_msec_t) (r->resend_timeout * 1000));
     }
 
@@ -1508,6 +1514,8 @@ ngx_resolver_resend_handler(ngx_event_t *ev)
 #endif
 
     if (timer) {
+        // 取各类定时器最小值作为下次定时时间间隔
+        // timer为0表明无需再继续添加resend定时器了
         ngx_add_timer(r->event, (ngx_msec_t) (timer * 1000));
     }
 }
@@ -1531,6 +1539,8 @@ ngx_resolver_resend(ngx_resolver_t *r, ngx_rbtree_t *tree, ngx_queue_t *queue)
 
         rn = ngx_queue_data(q, ngx_resolver_node_t, queue);
 
+        // 由于resend机制定时器是作用于resolver的所有请求，因此此处超时回调的时机不一定是该RN的过期时间到了
+        // 因此这里用当前时间与rn的expire做比对
         if (now < rn->expire) {
             return rn->expire - now;
         }
@@ -1538,17 +1548,19 @@ ngx_resolver_resend(ngx_resolver_t *r, ngx_rbtree_t *tree, ngx_queue_t *queue)
         ngx_log_debug3(NGX_LOG_DEBUG_CORE, r->log, 0,
                        "resolver resend \"%*s\" %p",
                        (size_t) rn->nlen, rn->name, rn->waiting);
-
+        // 已经超时的RN，从对应的resend queue中移除
         ngx_queue_remove(q);
 
         if (rn->waiting) {
-
+            // 如果rn还处于waiting，表明DNS还未正常响应，并且还未达到resolver_timeout配置的总超时时间
+            // 则循环重试查询resolver的所有配置的dns ip
             if (++rn->last_connection == r->connections.nelts) {
                 rn->last_connection = 0;
             }
 
             (void) ngx_resolver_send_query(r, rn);
 
+            // 将新的重试查询设置重试超时时间，插入相应的resend queue
             rn->expire = now + r->resend_timeout;
 
             ngx_queue_insert_head(queue, q);
@@ -1556,6 +1568,7 @@ ngx_resolver_resend(ngx_resolver_t *r, ngx_rbtree_t *tree, ngx_queue_t *queue)
             continue;
         }
 
+        // 当resolver_timeout时，re
         ngx_rbtree_delete(tree, &rn->node);
 
         ngx_resolver_free_node(r, rn);

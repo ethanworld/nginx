@@ -167,7 +167,7 @@ struct ngx_resolver_s {
     ngx_rbtree_t              addr_rbtree;
     ngx_rbtree_node_t         addr_sentinel;
 
-    ngx_queue_t               name_resend_queue;
+    ngx_queue_t               name_resend_queue; // 重试队列的目的是循环重试resolver配置的所有DNS server IP，直至resolver_timeout超时后返回错误给客户端
     ngx_queue_t               srv_resend_queue;
     ngx_queue_t               addr_resend_queue;
 
@@ -195,7 +195,7 @@ struct ngx_resolver_s {
 
 
 struct ngx_resolver_ctx_s {
-    ngx_resolver_ctx_t       *next;
+    ngx_resolver_ctx_t       *next; // 多个请求可能会查询相同的name，关联同一个RN
     ngx_resolver_t           *resolver;
     ngx_resolver_node_t      *node;
 
